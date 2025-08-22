@@ -1,174 +1,142 @@
 import streamlit as st
 import numpy as np
-from scipy.io.wavfile import write
-from scipy.signal import butter, lfilter, sawtooth, square
+import sounddevice as sd
 import io
 import random
 import matplotlib.pyplot as plt
+from scipy.signal import butter, lfilter
 
-# ------------------ Helpers ------------------
-NOTE_FREQS = {
-    "C4": 261.63, "D4": 293.66, "E4": 329.63, "F4": 349.23,
-    "G4": 392.00, "A4": 440.00, "B4": 493.88,
-    "C5": 523.25, "D5": 587.33, "E5": 659.25, "F5": 698.46,
-    "G5": 783.99, "A5": 880.00, "B5": 987.77
-}
+# ------------------------------------------
+# Utility: Apply ADSR Envelope
+# ------------------------------------------
+def adsr_envelope(attack, decay, sustain, release, duration, sr=44100):
+    attack_samples = int(sr * attack)
+    decay_samples = int(sr * decay)
+    sustain_samples = int(sr * (duration - attack - decay - release))
+    release_samples = int(sr * release)
 
-SCALES = {
-    "C Major": ["C4", "D4", "E4", "F4", "G4", "A4", "B4", "C5"],
-    "A Minor": ["A4", "B4", "C5", "D5", "E5", "F5", "G5", "A5"],
-    "Pentatonic": ["C4", "D4", "E4", "G4", "A4", "C5"]
-}
+    envelope = np.concatenate([
+        np.linspace(0, 1, attack_samples, endpoint=False), 
+        np.linspace(1, sustain, decay_samples, endpoint=False), 
+        np.full(sustain_samples, sustain), 
+        np.linspace(sustain, 0, release_samples, endpoint=True)
+    ])
+    return envelope
 
-CHORDS = {
-    "Cmaj": ["C4", "E4", "G4"], "Fmaj": ["F4", "A4", "C5"], "Gmaj": ["G4", "B4", "D5"],
-    "Am": ["A4", "C5", "E5"], "Dm": ["D4", "F4", "A4"], "Em": ["E4", "G4", "B4"]
-}
-
-def adsr_envelope(t, sample_rate, attack, decay, sustain_level, release):
-    env = np.zeros_like(t)
-    attack_end = int(attack * sample_rate)
-    decay_end = attack_end + int(decay * sample_rate)
-    sustain_end = len(t) - int(release * sample_rate)
-    env[:attack_end] = np.linspace(0, 1, attack_end, endpoint=False)
-    env[attack_end:decay_end] = np.linspace(1, sustain_level, decay_end - attack_end, endpoint=False)
-    env[decay_end:sustain_end] = sustain_level
-    env[sustain_end:] = np.linspace(sustain_level, 0, len(t) - sustain_end, endpoint=False)
-    return env
-
-def butter_filter(data, cutoff, fs, filter_type="low"):
+# ------------------------------------------
+# Utility: Low-pass filter
+# ------------------------------------------
+def butter_lowpass(cutoff, fs, order=5):
     nyq = 0.5 * fs
     normal_cutoff = cutoff / nyq
-    b, a = butter(4, normal_cutoff, btype=filter_type, analog=False)
-    return lfilter(b, a, data)
+    b, a = butter(order, normal_cutoff, btype='low', analog=False)
+    return b, a
 
-def generate_waveform(freq, t, wave_type="Sine"):
-    if wave_type == "Sine": return np.sin(2 * np.pi * freq * t)
-    if wave_type == "Square": return square(2 * np.pi * freq * t)
-    if wave_type == "Saw": return sawtooth(2 * np.pi * freq * t)
-    if wave_type == "Triangle": return sawtooth(2 * np.pi * freq * t, width=0.5)
-    return np.sin(2 * np.pi * freq * t)
+def lowpass_filter(data, cutoff, fs, order=5):
+    b, a = butter_lowpass(cutoff, fs, order=order)
+    y = lfilter(b, a, data)
+    return y
 
-def generate_note(note_name, t, wave_type, adsr, sample_rate):
-    freq = NOTE_FREQS.get(note_name, 440.0)
-    wave = generate_waveform(freq, t, wave_type)
-    env = adsr_envelope(t, sample_rate, *adsr)
-    return wave * env
+# ------------------------------------------
+# Synth Note Generator
+# ------------------------------------------
+def generate_tone(freq=440, duration=1.0, waveform="sine", 
+                  attack=0.01, decay=0.1, sustain=0.8, release=0.2,
+                  cutoff=1000, sr=44100):
+    t = np.linspace(0, duration, int(sr * duration), endpoint=False)
+    
+    if waveform == "sine":
+        wave = np.sin(2 * np.pi * freq * t)
+    elif waveform == "square":
+        wave = np.sign(np.sin(2 * np.pi * freq * t))
+    elif waveform == "sawtooth":
+        wave = 2 * (t * freq - np.floor(0.5 + t * freq))
+    elif waveform == "triangle":
+        wave = 2 * np.abs(2 * (t * freq - np.floor(t * freq + 0.5))) - 1
+    else:
+        wave = np.sin(2 * np.pi * freq * t)
 
-def generate_audio(note_names, duration, wave_type, adsr,
-                   filter_on, cutoff, filter_type,
-                   sample_rate=44100):
-    t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
-    wave = np.zeros_like(t)
-    for note_name in note_names:
-        wave += generate_note(note_name, t, wave_type, adsr, sample_rate)
-    if filter_on:
-        wave = butter_filter(wave, cutoff, sample_rate, filter_type)
-    wave = wave / np.max(np.abs(wave))
-    audio_int16 = np.int16(wave * 32767)
-    buffer = io.BytesIO()
-    write(buffer, sample_rate, audio_int16)
-    buffer.seek(0)
-    return buffer, wave, t
+    env = adsr_envelope(attack, decay, sustain, release, duration, sr)
+    wave = wave[:len(env)] * env
 
-# ------------------ Streamlit UI ------------------
-st.title("🎹 Python Music Lab - Mini Synth & Generator")
+    # Apply filter
+    wave = lowpass_filter(wave, cutoff, sr)
+    
+    return wave
 
-# ADSR controls
-st.subheader("ADSR Envelope")
-attack = st.slider("Attack (s)", 0.01, 2.0, 0.2, 0.01)
-decay = st.slider("Decay (s)", 0.01, 2.0, 0.3, 0.01)
-sustain = st.slider("Sustain Level", 0.0, 1.0, 0.5, 0.01)
-release = st.slider("Release (s)", 0.01, 2.0, 0.5, 0.01)
+# ------------------------------------------
+# Random melody generator
+# ------------------------------------------
+def generate_random_melody(duration=10, sr=44100):
+    freqs = [261.63, 293.66, 329.63, 392.00, 440.00, 523.25]  # C major scale
+    melody = np.array([])
+    note_duration = 0.8  # longer, slower notes
+    while len(melody) < sr * duration:
+        freq = random.choice(freqs)
+        tone = generate_tone(freq, duration=note_duration, waveform="sine", 
+                             attack=0.05, decay=0.2, sustain=0.6, release=0.3, cutoff=800)
+        melody = np.concatenate([melody, tone])
+    return melody[:int(sr*duration)]
 
-# Waveform + duration
-st.subheader("Waveform & Duration")
-wave_type = st.selectbox("Waveform", ["Sine", "Square", "Saw", "Triangle"])
-duration = st.slider("Duration (s)", 0.5, 5.0, 2.0, 0.1)
+# ------------------------------------------
+# Random chords + notes sequence generator
+# ------------------------------------------
+def generate_random_chords(duration=10, sr=44100):
+    chords = [
+        [261.63, 329.63, 392.00],   # C major
+        [293.66, 369.99, 440.00],   # D minor
+        [329.63, 415.30, 493.88],   # E minor
+        [349.23, 440.00, 523.25]    # F major
+    ]
+    sequence = np.array([])
+    chord_duration = 1.5
+    while len(sequence) < sr * duration:
+        chord = random.choice(chords)
+        chord_wave = sum([generate_tone(f, duration=chord_duration, waveform="sawtooth",
+                                        attack=0.05, decay=0.2, sustain=0.7, release=0.3, cutoff=1200) for f in chord])
+        chord_wave /= len(chord)
+        sequence = np.concatenate([sequence, chord_wave])
+    return sequence[:int(sr*duration)]
 
-# Filter
-st.subheader("Filter")
-filter_on = st.checkbox("Enable Filter", value=False)
-if filter_on:
-    filter_type = st.radio("Filter Type", ["low", "high"])
-    cutoff = st.slider("Cutoff Frequency (Hz)", 100, 5000, 1000)
-else:
-    filter_type, cutoff = "low", 1000
+# ------------------------------------------
+# Streamlit UI
+# ------------------------------------------
+st.title("🎹 Python Synth & Melody Generator")
 
-# ------------------ Play Options ------------------
-st.subheader("Play Options")
+st.sidebar.header("ADSR Controls")
+attack = st.sidebar.slider("Attack", 0.01, 1.0, 0.1)
+decay = st.sidebar.slider("Decay", 0.01, 1.0, 0.2)
+sustain = st.sidebar.slider("Sustain", 0.1, 1.0, 0.7)
+release = st.sidebar.slider("Release", 0.01, 1.0, 0.3)
 
-col1, col2 = st.columns(2)
-with col1:
-    note_choice = st.selectbox("🎵 Play a Note", list(NOTE_FREQS.keys()))
-    if st.button("Play Note"):
-        wav_file, wave, t = generate_audio([note_choice], duration, wave_type,
-                                           (attack, decay, sustain, release),
-                                           filter_on, cutoff, filter_type)
-        st.audio(wav_file, format="audio/wav")
-        fig, ax = plt.subplots(2, 1, figsize=(6, 4))
-        ax[0].plot(t[:1000], wave[:1000]); ax[0].set_title("Waveform (zoomed)")
-        spectrum = np.abs(np.fft.rfft(wave))
-        freqs = np.fft.rfftfreq(len(wave), 1/44100)
-        ax[1].plot(freqs, spectrum); ax[1].set_title("Spectrum")
-        st.pyplot(fig)
+st.sidebar.header("Filter Controls")
+cutoff = st.sidebar.slider("Cutoff Frequency (Hz)", 100, 5000, 1000)
 
-with col2:
-    chord_choice = st.selectbox("🎶 Play a Chord", list(CHORDS.keys()))
-    if st.button("Play Chord"):
-        wav_file, wave, t = generate_audio(CHORDS[chord_choice], duration, wave_type,
-                                           (attack, decay, sustain, release),
-                                           filter_on, cutoff, filter_type)
-        st.audio(wav_file, format="audio/wav")
+waveform = st.selectbox("Waveform", ["sine", "square", "sawtooth", "triangle"])
+freq = st.slider("Frequency (Hz)", 100, 1000, 440)
+duration = st.slider("Duration (s)", 1, 5, 2)
 
-# ------------------ Random Generators ------------------
-st.subheader("Random Music Generators")
+if st.button("▶️ Play Single Note"):
+    wave = generate_tone(freq, duration, waveform, attack, decay, sustain, release, cutoff)
+    sd.play(wave, samplerate=44100)
+    sd.wait()
+    st.success("Played note!")
+    st.line_chart(wave[:2000])  # visualize waveform
 
-if st.button("Generate Random Melody"):
-    scale = random.choice(list(SCALES.keys()))
-    notes = random.choices(SCALES[scale], k=5)
-    wav_file, wave, t = generate_audio(notes, duration, wave_type,
-                                       (attack, decay, sustain, release),
-                                       filter_on, cutoff, filter_type)
-    st.write(f"Scale used: {scale}, Notes: {notes}")
-    st.audio(wav_file, format="audio/wav")
+if st.button("🎵 Generate Random Melody"):
+    melody = generate_random_melody()
+    sd.play(melody, samplerate=44100)
+    sd.wait()
+    st.success("Generated peaceful random melody!")
+    fig, ax = plt.subplots()
+    ax.plot(melody[:5000])
+    st.pyplot(fig)
 
-if st.button("Generate Random Chord Progression"):
-    chords = random.choices(list(CHORDS.keys()), k=4)
-    all_notes = [note for ch in chords for note in CHORDS[ch]]
-    wav_file, wave, t = generate_audio(all_notes, duration, wave_type,
-                                       (attack, decay, sustain, release),
-                                       filter_on, cutoff, filter_type)
-    st.write(f"Chord progression: {chords}")
-    st.audio(wav_file, format="audio/wav")
-
-if st.button("Generate Random Sequence (Chords + Notes)"):
-    sequence = []
-    for _ in range(4):
-        if random.random() > 0.5:
-            sequence.extend(random.choices(list(CHORDS.keys()), k=1))
-        else:
-            sequence.extend(random.choices(list(NOTE_FREQS.keys()), k=1))
-    all_notes = []
-    for s in sequence:
-        if s in CHORDS: all_notes.extend(CHORDS[s])
-        elif s in NOTE_FREQS: all_notes.append(s)
-    wav_file, wave, t = generate_audio(all_notes, duration, wave_type,
-                                       (attack, decay, sustain, release),
-                                       filter_on, cutoff, filter_type)
-    st.write(f"Sequence: {sequence}")
-    st.audio(wav_file, format="audio/wav")
-
-# ------------------ Virtual Keyboard ------------------
-st.subheader("🎹 Virtual Keyboard")
-cols = st.columns(len(NOTE_FREQS))
-for i, note_name in enumerate(NOTE_FREQS.keys()):
-    if cols[i].button(note_name):
-        wav_file, wave, t = generate_audio([note_name], duration, wave_type,
-                                           (attack, decay, sustain, release),
-                                           filter_on, cutoff, filter_type)
-        st.audio(wav_file, format="audio/wav")
-
-# ------------------ Download ------------------
-if st.button("Download Last Sound"):
-    st.download_button("⬇️ Download WAV", wav_file, file_name="synth_output.wav")
+if st.button("🎶 Generate Random Chords + Notes"):
+    chords = generate_random_chords()
+    sd.play(chords, samplerate=44100)
+    sd.wait()
+    st.success("Generated random chords + notes sequence!")
+    fig, ax = plt.subplots()
+    ax.plot(chords[:5000])
+    st.pyplot(fig)
