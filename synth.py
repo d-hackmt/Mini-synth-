@@ -5,116 +5,127 @@ import io
 import random
 import matplotlib.pyplot as plt
 
-# Sampling rate
-SAMPLE_RATE = 44100  
+# ---------------------------------------
+# Synth Core
+# ---------------------------------------
 
-# ADSR Envelope
-def adsr_envelope(duration, attack, decay, sustain, release, sustain_level=0.7):
-    total_samples = int(SAMPLE_RATE * duration)
+SAMPLE_RATE = 44100
+
+def adsr_envelope(attack, decay, sustain, release, duration):
     attack_samples = int(attack * SAMPLE_RATE)
     decay_samples = int(decay * SAMPLE_RATE)
     release_samples = int(release * SAMPLE_RATE)
-    sustain_samples = max(0, total_samples - (attack_samples + decay_samples + release_samples))
+    sustain_samples = int(duration * SAMPLE_RATE) - (attack_samples + decay_samples + release_samples)
 
-    # Attack
-    attack_curve = np.linspace(0, 1, attack_samples)
-    # Decay
-    decay_curve = np.linspace(1, sustain_level, decay_samples)
-    # Sustain
-    sustain_curve = np.ones(sustain_samples) * sustain_level
-    # Release
-    release_curve = np.linspace(sustain_level, 0, release_samples)
+    if sustain_samples < 0:
+        sustain_samples = 0
 
-    envelope = np.concatenate([attack_curve, decay_curve, sustain_curve, release_curve])
-    if len(envelope) < total_samples:
-        envelope = np.pad(envelope, (0, total_samples - len(envelope)), 'constant')
-    return envelope
+    attack_env = np.linspace(0, 1, attack_samples, False)
+    decay_env = np.linspace(1, sustain, decay_samples, False)
+    sustain_env = np.ones(sustain_samples) * sustain
+    release_env = np.linspace(sustain, 0, release_samples, False)
 
-# Oscillator (sine wave)
-def osc(frequency, duration, attack, decay, sustain, release, waveform="sine"):
-    t = np.linspace(0, duration, int(SAMPLE_RATE * duration), endpoint=False)
+    return np.concatenate((attack_env, decay_env, sustain_env, release_env))
+
+
+def generate_wave(freq, duration, adsr, waveform="sine"):
+    t = np.linspace(0, duration, int(SAMPLE_RATE * duration), False)
     
     if waveform == "sine":
-        wave = np.sin(2 * np.pi * frequency * t)
+        wave = np.sin(freq * t * 2 * np.pi)
     elif waveform == "square":
-        wave = np.sign(np.sin(2 * np.pi * frequency * t))
+        wave = np.sign(np.sin(freq * t * 2 * np.pi))
     elif waveform == "saw":
-        wave = 2 * (t * frequency - np.floor(0.5 + t * frequency))
+        wave = 2 * (t * freq - np.floor(0.5 + t * freq))
+    elif waveform == "triangle":
+        wave = 2 * np.abs(2 * (t * freq - np.floor(0.5 + t * freq))) - 1
     else:
-        wave = np.sin(2 * np.pi * frequency * t)
+        wave = np.sin(freq * t * 2 * np.pi)
 
-    envelope = adsr_envelope(duration, attack, decay, sustain, release)
-    return wave * envelope
+    env = adsr_envelope(*adsr, duration)
+    wave = wave[:len(env)] * env
+    return wave
 
-# Play sound
-def play_sound(audio):
-    sd.stop()
-    sd.play(audio, samplerate=SAMPLE_RATE)
 
-# Random melody generator
-def generate_random_melody(duration, attack, decay, sustain, release):
-    freqs = [261.63, 293.66, 329.63, 349.23, 392.00, 440.00, 493.88]  # C major scale
-    note_duration = 0.5
+def play_sound(wave):
+    sd.play(wave, SAMPLE_RATE)
+    sd.wait()
+
+
+# ---------------------------------------
+# Music Generation Functions
+# ---------------------------------------
+
+NOTES = {"C":261.63,"D":293.66,"E":329.63,"F":349.23,"G":392.00,"A":440.00,"B":493.88}
+CHORDS = {
+    "Cmaj":[261.63,329.63,392.00],
+    "Fmaj":[349.23,440.00,523.25],
+    "Gmaj":[392.00,493.88,587.33],
+    "Amin":[440.00,523.25,659.25]
+}
+
+def random_melody(adsr, waveform, duration=10):
     melody = np.array([])
-
-    for _ in range(int(duration / note_duration)):
-        f = random.choice(freqs)
-        note = osc(f, note_duration, attack, decay, sustain, release, waveform="sine")
-        melody = np.concatenate([melody, note])
+    note_duration = duration / 8  # 8 notes spread
+    for _ in range(8):
+        note = random.choice(list(NOTES.values()))
+        melody = np.concatenate((melody, generate_wave(note, note_duration, adsr, waveform)))
     return melody
 
-# Random chord progression
-def generate_random_chords(duration, attack, decay, sustain, release):
-    chords = [
-        [261.63, 329.63, 392.00],  # C major
-        [293.66, 349.23, 440.00],  # D minor
-        [329.63, 392.00, 493.88],  # E minor
-        [349.23, 440.00, 523.25],  # F major
-    ]
-    chord_duration = 1.0
-    sequence = np.array([])
 
-    for _ in range(int(duration / chord_duration)):
-        chord = random.choice(chords)
-        layered_chord = sum([osc(f, chord_duration, attack, decay, sustain, release) for f in chord]) / len(chord)
-        sequence = np.concatenate([sequence, layered_chord])
-    return sequence
+def random_chord_progression(adsr, waveform, duration=10):
+    progression = np.array([])
+    chord_duration = duration / 4  # 4 chords
+    for _ in range(4):
+        chord = random.choice(list(CHORDS.values()))
+        chord_wave = sum(generate_wave(n, chord_duration, adsr, waveform) for n in chord) / len(chord)
+        progression = np.concatenate((progression, chord_wave))
+    return progression
 
-# Combined sequence (melody + chords layered)
-def generate_random_sequence(duration, attack, decay, sustain, release):
-    melody = generate_random_melody(duration, attack, decay, sustain, release)
-    chords = generate_random_chords(duration, attack, decay, sustain, release)
-    min_len = min(len(melody), len(chords))
-    return (melody[:min_len] + chords[:min_len]) / 2.0
 
+def random_sequence(adsr, waveform, duration=10):
+    seq = np.array([])
+    section_duration = duration / 6
+    for _ in range(6):
+        if random.random() > 0.5:  # sometimes play note
+            note = random.choice(list(NOTES.values()))
+            seq = np.concatenate((seq, generate_wave(note, section_duration, adsr, waveform)))
+        else:  # sometimes play chord
+            chord = random.choice(list(CHORDS.values()))
+            chord_wave = sum(generate_wave(n, section_duration, adsr, waveform) for n in chord) / len(chord)
+            seq = np.concatenate((seq, chord_wave))
+    return seq
+
+
+# ---------------------------------------
 # Streamlit UI
-st.title("🎹 ADSR Synth with Random Music Generator")
+# ---------------------------------------
 
-# Sliders for ADSR
-attack = st.slider("Attack", 0.01, 2.0, 0.1, 0.01)
-decay = st.slider("Decay", 0.01, 2.0, 0.2, 0.01)
-sustain = st.slider("Sustain", 0.01, 5.0, 0.5, 0.01)
-release = st.slider("Release", 0.01, 3.0, 0.5, 0.01)
+st.title("🎹 Mini Synth with ADSR, Chords & Melodies")
 
-# Buttons
-if st.button("🎵 Play Random Melody"):
-    melody = generate_random_melody(10, attack, decay, sustain, release)
-    play_sound(melody)
+A = st.slider("Attack", 0.01, 2.0, 0.1)
+D = st.slider("Decay", 0.01, 2.0, 0.2)
+S = st.slider("Sustain", 0.0, 1.0, 0.7)
+R = st.slider("Release", 0.01, 2.0, 0.5)
+waveform = st.selectbox("Waveform", ["sine", "square", "saw", "triangle"])
 
-if st.button("🎶 Play Random Chords"):
-    chords = generate_random_chords(10, attack, decay, sustain, release)
-    play_sound(chords)
+adsr = (A, D, S, R)
 
-if st.button("🎼 Play Combined Sequence (Melody + Chords)"):
-    seq = generate_random_sequence(10, attack, decay, sustain, release)
-    play_sound(seq)
+if st.button("🎶 Play Random Melody (10s)"):
+    wave = random_melody(adsr, waveform, duration=10)
+    play_sound(wave)
 
-# ADSR Visualizer
-if st.button("📊 Show ADSR Envelope"):
-    env = adsr_envelope(2, attack, decay, sustain, release)
-    plt.figure(figsize=(8,4))
-    plt.plot(env)
-    plt.title("ADSR Envelope Shape")
-    plt.xlabel("Samples")
-    plt.ylabel("Amplitude")
-    st.pyplot(plt)
+if st.button("🎵 Play Random Chord Progression (10s)"):
+    wave = random_chord_progression(adsr, waveform, duration=10)
+    play_sound(wave)
+
+if st.button("🎼 Play Random Sequence (Notes + Chords, 10s)"):
+    wave = random_sequence(adsr, waveform, duration=10)
+    play_sound(wave)
+
+# Waveform visualization
+if st.button("📊 Visualize Last Waveform"):
+    if 'wave' in locals():
+        fig, ax = plt.subplots()
+        ax.plot(wave[:2000])
+        st.pyplot(fig)
