@@ -1,142 +1,130 @@
-import streamlit as st
-import numpy as np
-import sounddevice as sd
 import io
 import random
 import matplotlib.pyplot as plt
-from scipy.signal import butter, lfilter
 
-# ------------------------------------------
-# Utility: Apply ADSR Envelope
-# ------------------------------------------
-def adsr_envelope(attack, decay, sustain, release, duration, sr=44100):
-    attack_samples = int(sr * attack)
-    decay_samples = int(sr * decay)
-    sustain_samples = int(sr * (duration - attack - decay - release))
-    release_samples = int(sr * release)
+# Sampling rate
+SAMPLE_RATE = 44100  
 
-    envelope = np.concatenate([
-        np.linspace(0, 1, attack_samples, endpoint=False), 
-        np.linspace(1, sustain, decay_samples, endpoint=False), 
-        np.full(sustain_samples, sustain), 
-        np.linspace(sustain, 0, release_samples, endpoint=True)
-    ])
+# ADSR Envelope
+def adsr_envelope(duration, attack, decay, sustain, release, sustain_level=0.7):
+    total_samples = int(SAMPLE_RATE * duration)
+    attack_samples = int(attack * SAMPLE_RATE)
+    decay_samples = int(decay * SAMPLE_RATE)
+    release_samples = int(release * SAMPLE_RATE)
+    sustain_samples = max(0, total_samples - (attack_samples + decay_samples + release_samples))
+
+    # Attack
+    attack_curve = np.linspace(0, 1, attack_samples)
+    # Decay
+    decay_curve = np.linspace(1, sustain_level, decay_samples)
+    # Sustain
+    sustain_curve = np.ones(sustain_samples) * sustain_level
+    # Release
+    release_curve = np.linspace(sustain_level, 0, release_samples)
+
+    envelope = np.concatenate([attack_curve, decay_curve, sustain_curve, release_curve])
+    if len(envelope) < total_samples:
+        envelope = np.pad(envelope, (0, total_samples - len(envelope)), 'constant')
     return envelope
 
-# ------------------------------------------
-# Utility: Low-pass filter
-# ------------------------------------------
-def butter_lowpass(cutoff, fs, order=5):
-    nyq = 0.5 * fs
-    normal_cutoff = cutoff / nyq
-    b, a = butter(order, normal_cutoff, btype='low', analog=False)
-    return b, a
+# Oscillator (sine wave)
+def osc(frequency, duration, attack, decay, sustain, release, waveform="sine"):
+    t = np.linspace(0, duration, int(SAMPLE_RATE * duration), endpoint=False)
 
-def lowpass_filter(data, cutoff, fs, order=5):
-    b, a = butter_lowpass(cutoff, fs, order=order)
-    y = lfilter(b, a, data)
-    return y
 
-# ------------------------------------------
-# Synth Note Generator
-# ------------------------------------------
-def generate_tone(freq=440, duration=1.0, waveform="sine", 
-                  attack=0.01, decay=0.1, sustain=0.8, release=0.2,
-                  cutoff=1000, sr=44100):
-    t = np.linspace(0, duration, int(sr * duration), endpoint=False)
-    
+
+
+
+
+
     if waveform == "sine":
-        wave = np.sin(2 * np.pi * freq * t)
+        wave = np.sin(2 * np.pi * frequency * t)
     elif waveform == "square":
-        wave = np.sign(np.sin(2 * np.pi * freq * t))
-    elif waveform == "sawtooth":
-        wave = 2 * (t * freq - np.floor(0.5 + t * freq))
-    elif waveform == "triangle":
-        wave = 2 * np.abs(2 * (t * freq - np.floor(t * freq + 0.5))) - 1
+        wave = np.sign(np.sin(2 * np.pi * frequency * t))
+    elif waveform == "saw":
+        wave = 2 * (t * frequency - np.floor(0.5 + t * frequency))
+
+
     else:
-        wave = np.sin(2 * np.pi * freq * t)
+        wave = np.sin(2 * np.pi * frequency * t)
 
-    env = adsr_envelope(attack, decay, sustain, release, duration, sr)
-    wave = wave[:len(env)] * env
+    envelope = adsr_envelope(duration, attack, decay, sustain, release)
+    return wave * envelope
 
-    # Apply filter
-    wave = lowpass_filter(wave, cutoff, sr)
-    
-    return wave
+# Play sound
+def play_sound(audio):
+    sd.stop()
+    sd.play(audio, samplerate=SAMPLE_RATE)
 
-# ------------------------------------------
+
 # Random melody generator
-# ------------------------------------------
-def generate_random_melody(duration=10, sr=44100):
-    freqs = [261.63, 293.66, 329.63, 392.00, 440.00, 523.25]  # C major scale
+def generate_random_melody(duration, attack, decay, sustain, release):
+    freqs = [261.63, 293.66, 329.63, 349.23, 392.00, 440.00, 493.88]  # C major scale
+    note_duration = 0.5
     melody = np.array([])
-    note_duration = 0.8  # longer, slower notes
-    while len(melody) < sr * duration:
-        freq = random.choice(freqs)
-        tone = generate_tone(freq, duration=note_duration, waveform="sine", 
-                             attack=0.05, decay=0.2, sustain=0.6, release=0.3, cutoff=800)
-        melody = np.concatenate([melody, tone])
-    return melody[:int(sr*duration)]
 
-# ------------------------------------------
-# Random chords + notes sequence generator
-# ------------------------------------------
-def generate_random_chords(duration=10, sr=44100):
+    for _ in range(int(duration / note_duration)):
+        f = random.choice(freqs)
+        note = osc(f, note_duration, attack, decay, sustain, release, waveform="sine")
+        melody = np.concatenate([melody, note])
+    return melody
+
+# Random chord progression
+def generate_random_chords(duration, attack, decay, sustain, release):
+
+
+
     chords = [
-        [261.63, 329.63, 392.00],   # C major
-        [293.66, 369.99, 440.00],   # D minor
-        [329.63, 415.30, 493.88],   # E minor
-        [349.23, 440.00, 523.25]    # F major
+        [261.63, 329.63, 392.00],  # C major
+        [293.66, 349.23, 440.00],  # D minor
+        [329.63, 392.00, 493.88],  # E minor
+        [349.23, 440.00, 523.25],  # F major
     ]
+    chord_duration = 1.0
     sequence = np.array([])
-    chord_duration = 1.5
-    while len(sequence) < sr * duration:
+
+    for _ in range(int(duration / chord_duration)):
         chord = random.choice(chords)
-        chord_wave = sum([generate_tone(f, duration=chord_duration, waveform="sawtooth",
-                                        attack=0.05, decay=0.2, sustain=0.7, release=0.3, cutoff=1200) for f in chord])
-        chord_wave /= len(chord)
-        sequence = np.concatenate([sequence, chord_wave])
-    return sequence[:int(sr*duration)]
+        layered_chord = sum([osc(f, chord_duration, attack, decay, sustain, release) for f in chord]) / len(chord)
+        sequence = np.concatenate([sequence, layered_chord])
+    return sequence
 
-# ------------------------------------------
+# Combined sequence (melody + chords layered)
+def generate_random_sequence(duration, attack, decay, sustain, release):
+    melody = generate_random_melody(duration, attack, decay, sustain, release)
+    chords = generate_random_chords(duration, attack, decay, sustain, release)
+    min_len = min(len(melody), len(chords))
+    return (melody[:min_len] + chords[:min_len]) / 2.0
+
+
 # Streamlit UI
-# ------------------------------------------
-st.title("🎹 Python Synth & Melody Generator")
+st.title("🎹 ADSR Synth with Random Music Generator")
 
-st.sidebar.header("ADSR Controls")
-attack = st.sidebar.slider("Attack", 0.01, 1.0, 0.1)
-decay = st.sidebar.slider("Decay", 0.01, 1.0, 0.2)
-sustain = st.sidebar.slider("Sustain", 0.1, 1.0, 0.7)
-release = st.sidebar.slider("Release", 0.01, 1.0, 0.3)
+# Sliders for ADSR
+attack = st.slider("Attack", 0.01, 2.0, 0.1, 0.01)
+decay = st.slider("Decay", 0.01, 2.0, 0.2, 0.01)
+sustain = st.slider("Sustain", 0.01, 5.0, 0.5, 0.01)
+release = st.slider("Release", 0.01, 3.0, 0.5, 0.01)
 
-st.sidebar.header("Filter Controls")
-cutoff = st.sidebar.slider("Cutoff Frequency (Hz)", 100, 5000, 1000)
+# Buttons
+if st.button("🎵 Play Random Melody"):
+    melody = generate_random_melody(10, attack, decay, sustain, release)
+    play_sound(melody)
 
-waveform = st.selectbox("Waveform", ["sine", "square", "sawtooth", "triangle"])
-freq = st.slider("Frequency (Hz)", 100, 1000, 440)
-duration = st.slider("Duration (s)", 1, 5, 2)
+if st.button("🎶 Play Random Chords"):
+    chords = generate_random_chords(10, attack, decay, sustain, release)
+    play_sound(chords)
 
-if st.button("▶️ Play Single Note"):
-    wave = generate_tone(freq, duration, waveform, attack, decay, sustain, release, cutoff)
-    sd.play(wave, samplerate=44100)
-    sd.wait()
-    st.success("Played note!")
-    st.line_chart(wave[:2000])  # visualize waveform
+if st.button("🎼 Play Combined Sequence (Melody + Chords)"):
+    seq = generate_random_sequence(10, attack, decay, sustain, release)
+    play_sound(seq)
 
-if st.button("🎵 Generate Random Melody"):
-    melody = generate_random_melody()
-    sd.play(melody, samplerate=44100)
-    sd.wait()
-    st.success("Generated peaceful random melody!")
-    fig, ax = plt.subplots()
-    ax.plot(melody[:5000])
-    st.pyplot(fig)
-
-if st.button("🎶 Generate Random Chords + Notes"):
-    chords = generate_random_chords()
-    sd.play(chords, samplerate=44100)
-    sd.wait()
-    st.success("Generated random chords + notes sequence!")
-    fig, ax = plt.subplots()
-    ax.plot(chords[:5000])
-    st.pyplot(fig)
+# ADSR Visualizer
+if st.button("📊 Show ADSR Envelope"):
+    env = adsr_envelope(2, attack, decay, sustain, release)
+    plt.figure(figsize=(8,4))
+    plt.plot(env)
+    plt.title("ADSR Envelope Shape")
+    plt.xlabel("Samples")
+    plt.ylabel("Amplitude")
+    st.pyplot(plt)
