@@ -143,8 +143,8 @@ def random_melody_note(root_name, mode, octave=5, allowed=[0,1,2,3,4,5,6]):
 # =========================
 # ---------- UI ----------
 # =========================
-st.set_page_config(page_title="Streamlit Synth", page_icon="🎹", layout="centered")
-st.title("🎹 Streamlit Mini Synth")
+st.set_page_config(page_title="Synthy", page_icon="🎹", layout="centered")
+st.title("🎹 Mini Synth yo")
 
 tab1, tab2 = st.tabs(["🎛️ Sound Design Fundamentals", "🎼 Generative Sequences"])
 
